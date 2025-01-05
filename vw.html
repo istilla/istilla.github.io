@@ -1,0 +1,169 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="https://cdn.simplecss.org/simple.min.css">
+<title>Vaultwarden on OpenBSD &mdash; istilla.github.io</title>
+
+<header>
+  <a href="index.html"><h1>stilla</h1></a>
+</header>
+<h1 id="vaultwarden-on-openbsd">Vaultwarden on OpenBSD</h1>
+<p>Leaving KeePassXC behind and getting a Hetzner CAX cloud server in one move.</p>
+<p><strong>Table of contents:</strong></p>
+<ul>
+<li><a href="#ipv6">IPv6</a></li>
+<li><a href="#httpd">HTTPD</a></li>
+<li><a href="#https">HTTPS</a></li>
+<li><a href="#relayd">relayd</a></li>
+<li><a href="#vaultwarden">Vaultwarden</a></li>
+<li><a href="#going-live">Going live!</a></li>
+</ul>
+<!-- headings -->
+<p><a id="ipv6"></a></p>
+<h2 id="ipv6">IPv6</h2>
+<pre><code>IPv6 address for vio0? (or &#39;autoconf&#39; or &#39;none&#39;) [none] autoconf
+</code></pre>
+<p>This you?<sup id="fnref1"><a href="#fn1" rel="footnote">1</a></sup> Let&#8217;s fix that:</p>
+<pre><code class="language-/etc/hostname.vio0">inet autoconf
+inet6 $addr
+</code></pre>
+<p>Add IPv6 gateway:</p>
+<pre><code class="language-/etc/mygate">fe80::1%vio0
+</code></pre>
+<p>Add the missing Hetzner recursive name servers:</p>
+<pre><code class="language-/etc/resolv.conf">nameserver 185.12.64.1 # resolvd: vio0
+nameserver 185.12.64.2 # resolvd: vio0
+nameserver 2a01:4ff:ff00::add:1
+nameserver 2a01:4ff:ff00::add:2
+lookup file bind
+</code></pre>
+<p><a id="httpd"></a></p>
+<h2 id="httpd">HTTPD</h2>
+<p>I&#8217;m not using a subdomain for this because I couldn&#8217;t care less.
+Add <code>&#47;etc&#47;httpd.conf</code> and run <code>rcctl -d start httpd</code> as root.</p>
+<pre><code class="language-/etc/httpd.conf">server "example.com" {
+  listen on * port 80
+  root "&#47;htdocs&#47;example.com"
+  location "&#47;.well-known&#47;acme-challenge&#47;*" {
+    root "&#47;acme"
+    request strip 2
+  }
+}
+</code></pre>
+<p><a id="https"></a></p>
+<h2 id="enabling-https">Enabling HTTPS</h2>
+<p>The OpenBSD way of getting certificates<sup id="fnref2"><a href="#fn2" rel="footnote">2</a></sup>:</p>
+<pre><code class="language-/etc/acme-client.conf">authority letsencrypt {
+  api url "https:&#47;&#47;acme-v02.api.letsencrypt.org&#47;directory"
+  account key "&#47;etc&#47;ssl&#47;private&#47;letsencrypt.key"
+}
+
+domain example.com {
+  alternative names { www.example.com }
+  domain key "&#47;etc&#47;ssl&#47;private&#47;example.com.key"
+  domain certificate "&#47;etc&#47;ssl&#47;example.com.crt"
+  domain full chain certificate "&#47;etc&#47;ssl&#47;example.com.pem"
+  sign with letsencrypt
+}
+</code></pre>
+<p>Almost there but not exactly. So what&#8217;s going on?
+In layman&#8217;s terms: <code>relayd</code> will look for <code>example.com.crt</code>,
+but for Bitwarden clients to work, we&#8217;ll need the full chain certificate.<sup id="fnref3"><a href="#fn3" rel="footnote">3</a></sup></p>
+<pre><code class="language-/etc/acme-client.conf">authority letsencrypt {
+  api url "https:&#47;&#47;acme-v02.api.letsencrypt.org&#47;directory"
+  account key "&#47;etc&#47;ssl&#47;private&#47;letsencrypt.key"
+}
+
+domain example.com {
+  alternative names { www.example.com }
+  domain key "&#47;etc&#47;ssl&#47;private&#47;example.com.key"
+  domain certificate "&#47;etc&#47;ssl&#47;example.com.crt.leaf"
+  domain full chain certificate "&#47;etc&#47;ssl&#47;example.com.crt"
+  sign with letsencrypt
+}
+</code></pre>
+<p>Now run <code>acme-client -v example.com</code> and <code>crontab -e</code>.</p>
+<pre><code class="language-/tmp/crontab">0       0       *       *       *       acme-client example.com &#38;&#38; rcctl restart relayd
+</code></pre>
+<p><a id="relayd"></a></p>
+<h2 id="relayd">relayd</h2>
+<p>Is this really necessary? I don&#8217;t know.
+You&#8217;re free to try and use httpd only.<sup id="fnref4"><a href="#fn4" rel="footnote">4</a></sup> <sup id="fnref5"><a href="#fn5" rel="footnote">5</a></sup></p>
+<pre><code class="language-/etc/relayd.conf">table &#60;vaultwarden-default-host&#62; { 127.0.0.1 }
+table &#60;vaultwarden-websocket-host&#62; { 127.0.0.1 }
+
+http protocol vaultwarden-https {
+  match request header append "X-Real-IP" value "$REMOTE_ADDR"
+  match request header append "Host" value "$HOST"
+  match request header append "X-Forwarded-For" value "$REMOTE_ADDR"
+  match request header append "X-Forwarded-By" value "$SERVER_ADDR:$SERVER_PORT"
+  match request path "&#47;*" forward to &#60;vaultwarden-default-host&#62;
+  match request path "&#47;notifications&#47;hub" forward to \
+    &#60;vaultwarden-websocket-host&#62;
+
+  match request path "&#47;notifications&#47;hub&#47;negotiate" forward to \
+    &#60;vaultwarden-default-host&#62;
+
+  tcp { nodelay, sack, backlog 128 }
+
+  tls keypair loifol.de
+  tls { no tlsv1.0, ciphers HIGH }
+  # tls ciphers TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+
+
+  http websockets
+}
+
+relay vaultwarden-https-relay {
+  listen on egress port 443 tls
+  protocol vaultwarden-https
+  forward to &#60;vaultwarden-default-host&#62; port 8000
+}
+</code></pre>
+<p><a id="vaultwarden"></a></p>
+<h2 id="vaultwarden">Vaultwarden</h2>
+<p>Begin with <code>pkg_add vaultwarden</code> and move onto the config.</p>
+<pre><code class="language-/var/vaultwarden/.env">DATA_FOLDER=data
+ENABLE_WEBSOCKET=true
+DOMAIN=https:&#47;&#47;example.com
+LOG_FILE=data&#47;vaultwarden.log
+LOG_LEVEL=error
+</code></pre>
+<p>Disable signups after yourself.</p>
+<p><a id="going-live"></a></p>
+<h2 id="going-live">Going live!</h2>
+<p>As root: <code>rcctl -d start relayd vaultwarden</code>.
+You can now import your KeePassXC (csv) exported data into your vault.<sup id="fnref6"><a href="#fn6" rel="footnote">6</a></sup>
+The <code>.csv</code> file is <em>unencrypted</em>, wipe it after you&#8217;re done.</p>
+<div class="footnotes">
+<hr/>
+<ol>
+
+<li id="fn1">
+<p><a href="https://www.tuxed.net/fkooman/blog/openbsd-ipv6-networking.html">OpenBSD IPv6-only Networking &#38; Firewall</a>&#160;<a href="#fnref1" rev="footnote">&#8617;</a></p>
+</li>
+
+<li id="fn2">
+<p><a href="https://romanzolotarev.com/openbsd/acme-client.html">Enable HTTPS with acme-client(1) and Let’s Encrypt on OpenBSD</a>&#160;<a href="#fnref2" rev="footnote">&#8617;</a></p>
+</li>
+
+<li id="fn3">
+<p><a href="https://github.com/bitwarden/mobile/issues/272"> Self hosted - Problem connecting server - Android #272 </a>&#160;<a href="#fnref3" rev="footnote">&#8617;</a></p>
+</li>
+
+<li id="fn4">
+<p><a href="https://%E3%83%9E%E3%83%AA%E3%82%A6%E3%82%B9.com/run-your-own-lastpass-on-hardened-openbsd/#relayd">Run Your Own LastPass on Hardened OpenBSD</a>&#160;<a href="#fnref4" rev="footnote">&#8617;</a></p>
+</li>
+
+<li id="fn5">
+<p><a href="https://www.reddit.com/r/openbsd/comments/1bx5rtb/openbsd_75_relayd_vaultwarden_websockets_not/">OpenBSD 7.5 - relayd -&#62; vaultwarden - websockets not working</a>&#160;<a href="#fnref5" rev="footnote">&#8617;</a></p>
+</li>
+
+<li id="fn6">
+<p><a href="https://bitwarden.com/help/import-data/">Import Data to your Vault</a>&#160;<a href="#fnref6" rev="footnote">&#8617;</a></p>
+</li>
+
+</ol>
+</div>
+<footer>
+  <p>stl 2025</p>
+</footer>
