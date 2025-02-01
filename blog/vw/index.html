@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>stilla</title>
+    <link rel="stylesheet" type="text/css" href="/style.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  </head>
+  <body>
+    <nav id="menu">
+      <a href="/">stilla</a>
+      <a href="/about/">about</a>
+    </nav>
+    <div><h1>Vaultwarden on OpenBSD</h1><p>Leaving KeePassXC behind and getting a Hetzner CAX cloud server in one move.</p><h2>IPv6</h2><pre><code>IPv6 address for vio0? (or &apos;autoconf&apos; or &apos;none&apos;) [none] autoconf
+</code></pre><p>This you? Let’s fix <code>/etc/hostname.vio0</code>:</p><pre><code>inet autoconf
+inet6 $addr
+</code></pre><p>Add IPv6 gateway (<code>/etc/mygate</code>):</p><pre><code>fe80::1%vio0
+</code></pre><p>Add the missing Hetzner recursive name servers (<code>/etc/resolv.conf</code>):</p><pre><code>nameserver 185.12.64.1 # resolvd: vio0
+nameserver 185.12.64.2 # resolvd: vio0
+nameserver 2a01:4ff:ff00::add:1
+nameserver 2a01:4ff:ff00::add:2
+lookup file bind
+</code></pre><h2>HTTPD</h2><p>I’m not using a subdomain for this. Add <code>/etc/httpd.conf</code> and run <code>rcctl -d start httpd</code> as root.</p><pre><code>server &quot;example.com&quot; {
+  listen on * port 80
+  root &quot;/htdocs/example.com&quot;
+  location &quot;/.well-known/acme-challenge/*&quot; {
+    root &quot;/acme&quot;
+    request strip 2
+  }
+}
+</code></pre><h2>Enabling HTTPS</h2><p>From the relayd.conf manpage:</p><blockquote><p>keypair name The relay will attempt to look up a private key in /etc/ssl/private/name:port.key and a public certificate in /etc/ssl/name:port.crt, where port is the specified port that the relay listens on. If these files are not present, the relay will continue to look in /etc/ssl/private/name.key and /etc/ssl/name.crt. This option can be specified multiple times for TLS Server Name Indication. If not specified, a keypair will be loaded using the specified IP address of the relay as name. See ssl(8) for details about TLS server certificates.</p><p>An optional OCSP staple file will be used during TLS handshakes with this server if it is found as a non-empty file in /etc/ssl/name:port.ocsp or /etc/ssl/name.ocsp. The file should contain a DER-format OCSP response retrieved from an OCSP server for the certificate in use, and can be created using ocspcheck(8).</p></blockquote><p>Configure <code>/etc/acme-client.conf</code>:</p><pre><code>authority letsencrypt {
+  api url &quot;https://acme-v02.api.letsencrypt.org/directory&quot;
+  account key &quot;/etc/ssl/private/letsencrypt.key&quot;
+}
+
+domain example.com {
+  alternative names { www.example.com }
+  domain key &quot;/etc/ssl/private/example.com.key&quot;
+  domain certificate &quot;/etc/ssl/example.com.crt.leaf&quot;
+  domain full chain certificate &quot;/etc/ssl/example.com.crt&quot;
+  sign with letsencrypt
+}
+</code></pre><p>Now run <code>acme-client -v example.com</code> and <code>crontab -e</code>.</p><pre><code>0       0       *       *       *       acme-client example.com &amp;&amp; rcctl restart relayd
+</code></pre><h2>relayd</h2><pre><code>$ cat /etc/relayd.conf
+table &lt;vaultwarden-default-host&gt; { 127.0.0.1 }
+table &lt;vaultwarden-websocket-host&gt; { 127.0.0.1 }
+
+http protocol vaultwarden-https {
+  match request header append &quot;X-Real-IP&quot; value &quot;$REMOTE_ADDR&quot;
+  match request header append &quot;Host&quot; value &quot;$HOST&quot;
+  match request header append &quot;X-Forwarded-For&quot; value &quot;$REMOTE_ADDR&quot;
+  match request header append &quot;X-Forwarded-By&quot; value &quot;$SERVER_ADDR:$SERVER_PORT&quot;
+  match request path &quot;/*&quot; forward to &lt;vaultwarden-default-host&gt;
+  match request path &quot;/notifications/hub&quot; forward to \
+    &lt;vaultwarden-websocket-host&gt;
+  match request path &quot;/notifications/hub/negotiate&quot; forward to \
+    &lt;vaultwarden-default-host&gt;
+
+  tcp { nodelay, sack, backlog 128 }
+
+  tls keypair example.com
+  tls { no tlsv1.0, ciphers HIGH }
+
+  http websockets
+}
+
+relay vaultwarden-https-relay {
+  listen on egress port 443 tls
+  protocol vaultwarden-https
+  forward to &lt;vaultwarden-default-host&gt; port 8000
+}
+</code></pre><h2>Vaultwarden</h2><p>As root:</p><pre><code># pkg_add vaultwarden vaultwarden-web
+# vi /var/vaultwarden/.env
+</code></pre><p>Example config:</p><pre><code>DATA_FOLDER=data
+ENABLE_WEBSOCKET=true
+DOMAIN=https://example.com
+LOG_FILE=data/vaultwarden.log
+LOG_LEVEL=error
+</code></pre><p>Disable signups after yourself.</p><h2>Going live!</h2><p>As root: <code>rcctl -d start relayd vaultwarden</code>. You can now import data to your vault.</p><h2>Further reading</h2><hr><p><a href="https://www.tuxed.net/fkooman/blog/openbsd-ipv6-networking.html" target="_blank">OpenBSD IPv6-only Networking & Firewall</a><br><a href="https://romanzolotarev.com/openbsd/acme-client.html" target="_blank">Enable HTTPS with acme-client(1) and Let’s Encrypt on OpenBSD</a><br><a href="https://github.com/bitwarden/mobile/issues/272" target="_blank">Self hosted - Problem connecting server - Android #272 </a><br><a href="https://www.zacbrown.org/posts/2021-04-10-openbsd-and-letsencrypt.html" target="_blank">OpenBSD, Let’s Encrypt, and Full Certificate Chains</a><br><a href="https://マリウス.com/run-your-own-lastpass-on-hardened-openbsd/#relayd" target="_blank">Run Your Own LastPass on Hardened OpenBSD</a><br><a href="https://www.reddit.com/r/openbsd/comments/1bx5rtb/openbsd_75_relayd_vaultwarden_websockets_not/" target="_blank">OpenBSD 7.5 - relayd -> vaultwarden - websockets not working</a><br><a href="https://bitwarden.com/help/import-data/" target="_blank">Import Data to your Vault</a></p></div>
+  </body>
+</html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>stilla</title>
+    <link rel="stylesheet" type="text/css" href="/style.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  </head>
+  <body>
+    <nav id="menu">
+      <a href="/">stilla</a>
+      <a href="/about/">about</a>
+    </nav>
+    <div><h1>Portable OpenBSD ksh on Ubuntu</h1><p>Bash is insane and this should be illegal: <code>bind -m vi-insert &quot;\C-l&quot;:clear-screen</code>. On Ubuntu, there’s no official package for oksh, only an outdated PPA.</p><blockquote><p>This guides use <em>doas</em> instead of <em>sudo</em>.</p></blockquote><pre><code>$ doas apt install -y gcc make
+$ git clone https://github.com/ibara/oksh
+$ cd oksh
+$ ./configure
+$ doas make &amp;&amp; doas make install
+$ doas echo &apos;/usr/local/bin/oksh&apos; &gt;&gt; /etc/shells
+$ chsh
+Password:
+Changing the login shell for $USER 
+Enter the new value, or press ENTER for the default
+        Login Shell [/usr/bin/bash]: /usr/local/bin/oksh
+
+</code></pre><p>Start a new shell and be greeted with:</p><pre><code>oksh: /etc/profile.d/Z99-cloud-locale-test.sh[100]: local: not found
+oksh: /etc/profile.d/Z99-cloud-locale-test.sh[100]: local: not found
+oksh: /etc/profile.d/Z99-cloudinit-warnings.sh[29]: local: not found
+oksh: /etc/profile.d/Z99-cloudinit-warnings.sh[29]: local: not found
+oksh: /etc/profile.d/Z99-cloudinit-warnings.sh[29]: local: not found
+</code></pre><p>Let’s fix that quickly:</p><pre><code>$ doas su
+# mv /etc/profile /etc/profile.bak
+# echo &apos;export ENV=$HOME/.kshrc&apos; &gt; profile
+</code></pre><p>Set a couple sane defaults on your .kshrc:</p><pre><code>set -o vi
+PS1=&apos;\u@\h:\W\$ &apos;
+</code></pre></div>
+  </body>
+</html>
